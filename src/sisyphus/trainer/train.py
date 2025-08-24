@@ -15,22 +15,16 @@ from typing import Dict
 
 from sisyphus.tasks.fsmn_agent import PPOLightningAgent
 from sisyphus.utils import linear_annealing, make_env
-from  einops import rearrange
+from einops import rearrange
 
 
 def flatten_data(
-    obs,
-    logprobs,
-    actions,
-    advantages,
-    returns,
-    values,
-    context_len:int = 9
+    obs, logprobs, actions, advantages, returns, values, context_len: int = 9
 ) -> Dict[str, Tensor]:
     obs = rearrange(obs, "t b a -> b t a")
-    obs = obs.unfold(1, context_len, 1) # [b, t, a] -> [b, t, a, c]
+    obs = obs.unfold(1, context_len, 1)  # [b, t, a] -> [b, t, a, c]
     obs = rearrange(obs, "b t a c -> (b t) c a")
-    
+
     logprobs = logprobs.T
     logprobs = logprobs.unfold(1, context_len, 1)
     logprobs = rearrange(logprobs, "b t c -> (b t) c")
@@ -91,6 +85,16 @@ def train(
             loss = agent.training_step({k: v[batch_idxes] for k, v in data.items()})
             optimizer.zero_grad(set_to_none=True)
             fabric.backward(loss)
+            total_norm = torch.norm(
+                torch.stack(
+                    [
+                        torch.norm(p.grad.detach(), 2)
+                        for p in agent.parameters()
+                        if p.grad is not None
+                    ]
+                )
+            )
+            fabric.log("Gradients/global_norm", total_norm, global_step)
             fabric.clip_gradients(agent, optimizer, max_norm=args.max_grad_norm)
             optimizer.step()
         agent.on_train_epoch_end(global_step)
@@ -102,11 +106,7 @@ def main(args):
         "outputs", "logs", "fabric_logs", datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
     )
     log_save_dir.mkdir(parents=True, exist_ok=True)
-    logger = WandbLogger(
-        save_dir=log_save_dir,
-        name=run_name,
-        project="sisyphus"
-    )
+    logger = WandbLogger(save_dir=log_save_dir, name=run_name, project="sisyphus")
 
     # Initialize Fabric
     fabric = Fabric(loggers=logger)
