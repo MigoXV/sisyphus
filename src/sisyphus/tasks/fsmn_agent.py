@@ -36,11 +36,12 @@ class PPOLightningAgent(LightningModule):
         self.avg_ent_loss = MeanMetric(**torchmetrics_kwargs)
 
     def get_action_and_value(
-        self, x: Tensor, action_cache: Tensor = None
+        self, x: Tensor, action: Tensor | None = None
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         action_logits, value, _ = self.actor_critic.get_action_value(x)
         distribution = Categorical(logits=action_logits)
-        action = distribution.sample()
+        if action is None:
+            action = distribution.sample()
         log_prob = distribution.log_prob(action)
         entropy = distribution.entropy()
         action = action.squeeze(-1)
@@ -53,7 +54,7 @@ class PPOLightningAgent(LightningModule):
         return value
 
     def forward(
-        self, x: Tensor, action: Tensor = None
+        self, x: Tensor, action: Tensor | None = None
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         return self.get_action_and_value(x, action)
 
