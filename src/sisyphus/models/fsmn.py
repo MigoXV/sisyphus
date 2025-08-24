@@ -128,7 +128,7 @@ class FSMNPolicy(nn.Module):
     def step(
         self,
         obs_t: torch.Tensor,
-        caches: Optional[List[torch.Tensor]],
+        caches: Optional[List[torch.Tensor]]=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
         # obs_t: [B, D]; single-step stateless call with external caches
         if obs_t.dim() != 2:

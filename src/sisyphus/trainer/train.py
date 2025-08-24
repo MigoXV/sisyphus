@@ -1,12 +1,13 @@
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 import gymnasium as gym
 import torch
 import torchmetrics
 from lightning.fabric import Fabric
-from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.loggers import WandbLogger
 from torch import Tensor
 from torch.utils.data import BatchSampler, DistributedSampler, RandomSampler
 from tqdm import tqdm, trange
@@ -51,16 +52,21 @@ def train(
 
 
 def main(args):
+    use_logger = False
     run_name = f"{args.env_id}_{args.exp_name}_{args.seed}_{int(time.time())}"
-    logger = CSVLogger(
-        save_dir=os.path.join(
-            "logs", "fabric_logs", datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
-        ),
+    log_save_dir = Path(
+        "outputs", "logs", "fabric_logs", datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
+    )
+    log_save_dir.mkdir(parents=True, exist_ok=True)
+    logger = WandbLogger(
+        save_dir=log_save_dir,
         name=run_name,
+        # flush_logs_every_n_steps=1,
+        project="sisyphus",
     )
 
     # Initialize Fabric
-    fabric = Fabric(loggers=logger)
+    fabric = Fabric(loggers=logger if use_logger else None)
     fabric.launch()
     rank = fabric.global_rank
     world_size = fabric.world_size
@@ -126,7 +132,8 @@ def main(args):
     # Get the first environment observation and start the optimization
     next_obs = torch.tensor(envs.reset(seed=args.seed)[0], device=device)
     next_done = torch.zeros(args.num_envs, device=device)
-    for update in trange(1, num_updates + 1, leave=False):
+    episode_bar = trange(1, num_updates + 1, leave=False)
+    for update in episode_bar:
         # Learning rate annealing
         if args.anneal_lr:
             linear_annealing(optimizer, update, num_updates, args.learning_rate)
@@ -145,29 +152,47 @@ def main(args):
             logprobs[step] = logprob
 
             # Single environment step
-            next_obs, reward, done, truncated, info = envs.step(action.cpu().numpy())
-            done = torch.logical_or(torch.tensor(done), torch.tensor(truncated))
-            rewards[step] = torch.tensor(
-                reward, device=device, dtype=torch.float32
-            ).view(-1)
-            next_obs, next_done = torch.tensor(next_obs, device=device), done.to(device)
+            next_obs_np, reward_np, terminated_np, truncated_np, info = envs.step(
+                action.cpu().numpy()
+            )
+
+            # Convert to tensors on the right device/dtype
+            reward_t = torch.as_tensor(reward_np, device=device, dtype=torch.float32)
+            term_t = torch.as_tensor(terminated_np, device=device, dtype=torch.bool)
+            trunc_t = torch.as_tensor(truncated_np, device=device, dtype=torch.bool)
+            done_t = term_t | trunc_t
+
+            rewards[step] = reward_t.view(-1)
+            next_obs = torch.as_tensor(next_obs_np, device=device)
+            next_done = done_t
+
+            # ---- Robust episode-statistics handling (vectorized info) ----
             if info:
-                print(info)
-            if "final_info" in info:
-                for i, agent_final_info in enumerate(info["final_info"]):
-                    if agent_final_info is not None and "episode" in agent_final_info:
-                        fabric.print(
-                            f"Rank-0: global_step={global_step}, reward_env_{i}={agent_final_info['episode']['r'][0]}"
-                        )
-                        rew_avg(agent_final_info["episode"]["r"][0])
-                        ep_len_avg(agent_final_info["episode"]["l"][0])
+                # Case 1: aggregated dict with per-env arrays (Gymnasium + RecordEpisodeStatistics)
+                ep = info.get("episode", {})
+                mask = info.get("_episode", ep.get("_l", ep.get("_r")))
+                if mask is not None:
+                    finished = (
+                        torch.as_tensor(mask).nonzero(as_tuple=False).flatten().tolist()
+                    )
+                    for i in finished:
+                        try:
+                            r_i = float(ep.get("r", [0.0] * args.num_envs)[i])
+                            l_i = int(ep.get("l", [0] * args.num_envs)[i])
+                        except Exception:
+                            # Fallback keys if a custom wrapper renamed them
+                            r_i = float(ep.get("reward", [0.0] * args.num_envs)[i])
+                            l_i = int(ep.get("length", [0] * args.num_envs)[i])
+                        rew_avg(r_i)
+                        ep_len_avg(l_i)
 
         # Sync the metrics
         rew_avg_reduced = rew_avg.compute()
-        if not rew_avg_reduced.isnan():
+        if not torch.isnan(rew_avg_reduced):
             fabric.log("Rewards/rew_avg", rew_avg_reduced, global_step)
+            episode_bar.set_postfix(rew_avg=rew_avg_reduced.item())
         ep_len_avg_reduced = ep_len_avg.compute()
-        if not ep_len_avg_reduced.isnan():
+        if not torch.isnan(ep_len_avg_reduced):
             fabric.log("Game/ep_len_avg", ep_len_avg_reduced, global_step)
         rew_avg.reset()
         ep_len_avg.reset()
@@ -235,18 +260,18 @@ if __name__ == "__main__":
         torch_deterministic: bool = False
 
         # Distributed
-        num_envs: int = 4
+        num_envs: int = 8
         share_data: bool = False
         per_rank_batch_size: int = 64
 
         # Environment
         env_id: str = "CartPole-v1"
-        num_steps: int = 256
+        num_steps: int = 128
         capture_video: bool = False
 
         # PPO
-        total_timesteps: int = 2**12
-        learning_rate: float = 1e-3
+        total_timesteps: int = 2**22
+        learning_rate: float = 1e-4
         anneal_lr: bool = False
         gamma: float = 0.99
         gae_lambda: float = 0.95
