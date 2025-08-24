@@ -17,8 +17,8 @@ class CausalFSMNBlock(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.memory_order = memory_order
-        self.proj = nn.Identity()
-        self.taps = nn.Parameter(torch.zeros(hidden_dim, memory_order))
+        self.proj = nn.Linear(hidden_dim, hidden_dim)
+        self.taps = nn.Parameter(torch.randn(hidden_dim, memory_order))
         self.ln = nn.LayerNorm(hidden_dim) if use_layernorm else nn.Identity()
 
     def _build_dw_kernel(self, dtype, device):
@@ -108,7 +108,7 @@ class FSMNPolicy(nn.Module):
     def forward_chunk(
         self,
         obs_chunk: torch.Tensor,
-        caches: Optional[List[torch.Tensor]],
+        caches: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
         # obs_chunk: [B, T, D]; caches is a list of [B, H, K] (caller-owned)
         if obs_chunk.dim() == 2:
@@ -128,7 +128,7 @@ class FSMNPolicy(nn.Module):
     def step(
         self,
         obs_t: torch.Tensor,
-        caches: Optional[List[torch.Tensor]]=None,
+        caches: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
         # obs_t: [B, D]; single-step stateless call with external caches
         if obs_t.dim() != 2:

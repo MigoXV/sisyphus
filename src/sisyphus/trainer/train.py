@@ -11,9 +11,54 @@ from lightning.pytorch.loggers import WandbLogger
 from torch import Tensor
 from torch.utils.data import BatchSampler, DistributedSampler, RandomSampler
 from tqdm import trange
+from typing import Dict
 
 from sisyphus.tasks.fsmn_agent import PPOLightningAgent
 from sisyphus.utils import linear_annealing, make_env
+from  einops import rearrange
+
+
+def flatten_data(
+    obs,
+    logprobs,
+    actions,
+    advantages,
+    returns,
+    values,
+    context_len:int = 9
+) -> Dict[str, Tensor]:
+    obs = rearrange(obs, "t b a -> b t a")
+    obs = obs.unfold(1, context_len, 1) # [b, t, a] -> [b, t, a, c]
+    obs = rearrange(obs, "b t a c -> (b t) c a")
+    
+    logprobs = logprobs.T
+    logprobs = logprobs.unfold(1, context_len, 1)
+    logprobs = rearrange(logprobs, "b t c -> (b t) c")
+
+    actions = actions.T
+    actions = actions.unfold(1, context_len, 1)
+    actions = rearrange(actions, "b t c -> (b t) c")
+
+    values = values.T
+    values = values.unfold(1, context_len, 1)
+    values = rearrange(values, "b t c -> (b t) c")
+
+    advantages = advantages.T
+    advantages = advantages.unfold(1, context_len, 1)
+    advantages = rearrange(advantages, "b t c -> (b t) c")
+
+    returns = returns.T
+    returns = returns.unfold(1, context_len, 1)
+    returns = rearrange(returns, "b t c -> (b t) c")
+
+    return {
+        "obs": obs,
+        "logprobs": logprobs,
+        "actions": actions,
+        "advantages": advantages,
+        "returns": returns,
+        "values": values,
+    }
 
 
 def train(
@@ -60,7 +105,7 @@ def main(args):
     logger = WandbLogger(
         save_dir=log_save_dir,
         name=run_name,
-        project="sisyphus",
+        project="sisyphus"
     )
 
     # Initialize Fabric
@@ -204,16 +249,25 @@ def main(args):
             args.gae_lambda,
         )
 
+        # # Flatten the batch
+        # local_data = {
+        #     "obs": obs.reshape((-1,) + envs.single_observation_space.shape),
+        #     "logprobs": logprobs.reshape(-1),
+        #     "actions": actions.reshape((-1,) + envs.single_action_space.shape),
+        #     "advantages": advantages.reshape(-1),
+        #     "returns": returns.reshape(-1),
+        #     "values": values.reshape(-1),
+        # }
         # Flatten the batch
-        local_data = {
-            "obs": obs.reshape((-1,) + envs.single_observation_space.shape),
-            "logprobs": logprobs.reshape(-1),
-            "actions": actions.reshape((-1,) + envs.single_action_space.shape),
-            "advantages": advantages.reshape(-1),
-            "returns": returns.reshape(-1),
-            "values": values.reshape(-1),
-        }
-
+        # local_data = {
+        #     "obs": obs.reshape((-1,) + envs.single_observation_space.shape),
+        #     "logprobs": logprobs.reshape(-1),
+        #     "actions": actions.reshape((-1,) + envs.single_action_space.shape),
+        #     "advantages": advantages.reshape(-1),
+        #     "returns": returns.reshape(-1),
+        #     "values": values.reshape(-1),
+        # }
+        local_data = flatten_data(obs, logprobs, actions, advantages, returns, values)
         if args.share_data:
             # Gather all the tensors from all the world and reshape them
             gathered_data = fabric.all_gather(local_data)
