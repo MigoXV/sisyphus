@@ -2,23 +2,18 @@ import math
 
 import gymnasium as gym
 import torch
-import torch.nn.functional as F
 from lightning.pytorch import LightningModule
 from torch import Tensor
 from torch.distributions import Categorical
 from torchmetrics import MeanMetric
 
-from sisyphus.criterions.ppo_fabric import (entropy_loss, policy_loss,
-                                            value_loss)
-from sisyphus.utils import layer_init
+from sisyphus.criterions.ppo_fabric import entropy_loss, policy_loss, value_loss
+from sisyphus.models import ActorCriticWrapper
 
 
 class PPOLightningAgent(LightningModule):
     def __init__(
         self,
-        envs: gym.vector.SyncVectorEnv,
-        act_fun: str = "relu",
-        ortho_init: bool = False,
         vf_coef: float = 1.0,
         ent_coef: float = 0.0,
         clip_coef: float = 0.2,
@@ -27,70 +22,35 @@ class PPOLightningAgent(LightningModule):
         **torchmetrics_kwargs,
     ):
         super().__init__()
-        if act_fun.lower() == "relu":
-            act_fun = torch.nn.ReLU()
-        elif act_fun.lower() == "tanh":
-            act_fun = torch.nn.Tanh()
-        else:
-            raise ValueError(
-                "Unrecognized activation function: `act_fun` must be either `relu` or `tanh`"
-            )
+
         self.vf_coef = vf_coef
         self.ent_coef = ent_coef
         self.clip_coef = clip_coef
         self.clip_vloss = clip_vloss
         self.normalize_advantages = normalize_advantages
-        self.critic = torch.nn.Sequential(
-            layer_init(
-                torch.nn.Linear(math.prod(envs.single_observation_space.shape), 64),
-                ortho_init=ortho_init,
-            ),
-            act_fun,
-            layer_init(torch.nn.Linear(64, 64), ortho_init=ortho_init),
-            act_fun,
-            layer_init(torch.nn.Linear(64, 1), std=1.0, ortho_init=ortho_init),
-        )
-        self.actor = torch.nn.Sequential(
-            layer_init(
-                torch.nn.Linear(math.prod(envs.single_observation_space.shape), 64),
-                ortho_init=ortho_init,
-            ),
-            act_fun,
-            layer_init(torch.nn.Linear(64, 64), ortho_init=ortho_init),
-            act_fun,
-            layer_init(
-                torch.nn.Linear(64, envs.single_action_space.n),
-                std=0.01,
-                ortho_init=ortho_init,
-            ),
-        )
+
+        self.actor_critic = ActorCriticWrapper()
+
         self.avg_pg_loss = MeanMetric(**torchmetrics_kwargs)
         self.avg_value_loss = MeanMetric(**torchmetrics_kwargs)
         self.avg_ent_loss = MeanMetric(**torchmetrics_kwargs)
 
-    def get_action(
-        self, x: Tensor, action: Tensor = None
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        logits = self.actor(x)
-        distribution = Categorical(logits=logits)
-        if action is None:
-            action = distribution.sample()
-        return action, distribution.log_prob(action), distribution.entropy()
-
-    def get_greedy_action(self, x: Tensor) -> Tensor:
-        logits = self.actor(x)
-        probs = F.softmax(logits, dim=-1)
-        return torch.argmax(probs, dim=-1)
+    def get_action_and_value(
+        self, x: Tensor, action_cache: Tensor = None
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        action_logits, value, _ = self.actor_critic.get_action_value(x)
+        distribution = Categorical(logits=action_logits)
+        action = distribution.sample()
+        log_prob = distribution.log_prob(action)
+        entropy = distribution.entropy()
+        action = action.squeeze(-1)
+        log_prob = log_prob.squeeze(-1)
+        value = value.squeeze(-1)
+        return action, log_prob, entropy, value
 
     def get_value(self, x: Tensor) -> Tensor:
-        return self.critic(x)
-
-    def get_action_and_value(
-        self, x: Tensor, action: Tensor = None
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        action, log_prob, entropy = self.get_action(x, action)
-        value = self.get_value(x)
-        return action, log_prob, entropy, value
+        value = self.actor_critic.get_value(x)
+        return value
 
     def forward(
         self, x: Tensor, action: Tensor = None

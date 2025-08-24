@@ -9,7 +9,12 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "HTTP_PROXY": "socks5h://localhost:7891",
+                "HTTPS_PROXY": "socks5h://localhost:7891"
+            }
         },
     ]
 }
