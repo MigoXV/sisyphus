@@ -10,7 +10,7 @@ from lightning.fabric import Fabric
 from lightning.pytorch.loggers import WandbLogger
 from torch import Tensor
 from torch.utils.data import BatchSampler, DistributedSampler, RandomSampler
-from tqdm import tqdm, trange
+from tqdm import trange
 
 from sisyphus.tasks.fsmn_agent import PPOLightningAgent
 from sisyphus.utils import linear_annealing, make_env
@@ -52,7 +52,6 @@ def train(
 
 
 def main(args):
-    use_logger = False
     run_name = f"{args.env_id}_{args.exp_name}_{args.seed}_{int(time.time())}"
     log_save_dir = Path(
         "outputs", "logs", "fabric_logs", datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
@@ -61,12 +60,11 @@ def main(args):
     logger = WandbLogger(
         save_dir=log_save_dir,
         name=run_name,
-        # flush_logs_every_n_steps=1,
         project="sisyphus",
     )
 
     # Initialize Fabric
-    fabric = Fabric(loggers=logger if use_logger else None)
+    fabric = Fabric(loggers=logger)
     fabric.launch()
     rank = fabric.global_rank
     world_size = fabric.world_size
@@ -94,13 +92,10 @@ def main(args):
 
     # Define the agent and the optimizer and setup them with Fabric
     agent: PPOLightningAgent = PPOLightningAgent(
-        envs,
-        act_fun=args.activation_function,
         vf_coef=args.vf_coef,
         ent_coef=args.ent_coef,
         clip_coef=args.clip_coef,
         clip_vloss=args.clip_vloss,
-        ortho_init=args.ortho_init,
         normalize_advantages=args.normalize_advantages,
     )
     optimizer = agent.configure_optimizers(args.learning_rate)
@@ -256,7 +251,6 @@ if __name__ == "__main__":
         # PyTorch
         seed: int = 42
         cuda: bool = False
-        player_on_gpu: bool = False
         torch_deterministic: bool = False
 
         # Distributed
@@ -276,8 +270,6 @@ if __name__ == "__main__":
         gamma: float = 0.99
         gae_lambda: float = 0.95
         update_epochs: int = 10
-        activation_function: str = "relu"  # choices: ["relu", "tanh"]
-        ortho_init: bool = False
         normalize_advantages: bool = False
         clip_coef: float = 0.2
         clip_vloss: bool = False

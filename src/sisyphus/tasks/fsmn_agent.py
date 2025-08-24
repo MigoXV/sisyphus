@@ -14,9 +14,6 @@ from sisyphus.models import ActorCriticWrapper
 class PPOLightningAgent(LightningModule):
     def __init__(
         self,
-        envs: gym.vector.SyncVectorEnv,
-        act_fun: str = "relu",
-        ortho_init: bool = False,
         vf_coef: float = 1.0,
         ent_coef: float = 0.0,
         clip_coef: float = 0.2,
@@ -25,14 +22,7 @@ class PPOLightningAgent(LightningModule):
         **torchmetrics_kwargs,
     ):
         super().__init__()
-        if act_fun.lower() == "relu":
-            act_fun = torch.nn.ReLU()
-        elif act_fun.lower() == "tanh":
-            act_fun = torch.nn.Tanh()
-        else:
-            raise ValueError(
-                "Unrecognized activation function: `act_fun` must be either `relu` or `tanh`"
-            )
+
         self.vf_coef = vf_coef
         self.ent_coef = ent_coef
         self.clip_coef = clip_coef
