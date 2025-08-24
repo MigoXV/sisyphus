@@ -125,7 +125,7 @@ def main(args):
                 args.seed + rank * args.num_envs + i,
                 rank,
                 args.capture_video,
-                logger.log_dir,
+                "outputs",
                 "train",
             )
             for i in range(args.num_envs)

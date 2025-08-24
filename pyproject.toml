@@ -18,10 +18,14 @@ dependencies = [
 "omegaconf (>=2.3.0,<3.0.0)",
 "gymnasium (>=1.2.0,<2.0.0)",
 "einops (>=0.8.1,<0.9.0)",
+"pygame",
+"moviepy"
 ]
 
 [tool.poetry]
 packages = [{include = "sisyphus", from = "src"}]
+
+
 
 [project.optional-dependencies]
 cpu = [ "torch (==2.3.1+cpu)", "torchvision (==0.18.1+cpu)" ]
