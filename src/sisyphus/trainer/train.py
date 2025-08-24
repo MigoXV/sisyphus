@@ -1,22 +1,3 @@
-"""
-Proximal Policy Optimization (PPO) - Accelerated with Lightning Fabric
-
-Author: Federico Belotti @belerico
-Adapted from https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py
-Based on the paper: https://arxiv.org/abs/1707.06347
-
-Requirements:
-- gymnasium[box2d]>=0.27.1
-- moviepy
-- lightning
-- torchmetrics
-- tensorboard
-
-
-Run it with:
-    fabric run --accelerator=cpu --strategy=ddp --devices=2 train_fabric.py
-"""
-
 import argparse
 import os
 import time
@@ -25,13 +6,15 @@ from datetime import datetime
 import gymnasium as gym
 import torch
 import torchmetrics
-from sisyphus.models.agent import PPOLightningAgent
-from sisyphus.utils import linear_annealing, make_env, parse_args, test
+from sisyphus.tasks.fsmn_agent import PPOLightningAgent
+
+from sisyphus.utils import linear_annealing, make_env
 from torch import Tensor
 from torch.utils.data import BatchSampler, DistributedSampler, RandomSampler
 
 from lightning.fabric import Fabric
-from lightning.fabric.loggers import TensorBoardLogger
+from lightning.fabric.loggers.csv_logs import CSVLogger
+from tqdm import tqdm, trange
 
 
 def train(
@@ -45,11 +28,17 @@ def train(
     indexes = list(range(data["obs"].shape[0]))
     if args.share_data:
         sampler = DistributedSampler(
-            indexes, num_replicas=fabric.world_size, rank=fabric.global_rank, shuffle=True, seed=args.seed
+            indexes,
+            num_replicas=fabric.world_size,
+            rank=fabric.global_rank,
+            shuffle=True,
+            seed=args.seed,
         )
     else:
         sampler = RandomSampler(indexes)
-    sampler = BatchSampler(sampler, batch_size=args.per_rank_batch_size, drop_last=False)
+    sampler = BatchSampler(
+        sampler, batch_size=args.per_rank_batch_size, drop_last=False
+    )
 
     for epoch in range(args.update_epochs):
         if args.share_data:
@@ -65,8 +54,11 @@ def train(
 
 def main(args: argparse.Namespace):
     run_name = f"{args.env_id}_{args.exp_name}_{args.seed}_{int(time.time())}"
-    logger = TensorBoardLogger(
-        root_dir=os.path.join("logs", "fabric_logs", datetime.today().strftime("%Y-%m-%d_%H-%M-%S")), name=run_name
+    logger = CSVLogger(
+        root_dir=os.path.join(
+            "logs", "fabric_logs", datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
+        ),
+        name=run_name,
     )
 
     # Initialize Fabric
@@ -77,18 +69,23 @@ def main(args: argparse.Namespace):
     fabric.seed_everything(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    # Log hyperparameters
-    fabric.logger.experiment.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n{}".format("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
-
     # Environment setup
-    envs = gym.vector.SyncVectorEnv([
-        make_env(args.env_id, args.seed + rank * args.num_envs + i, rank, args.capture_video, logger.log_dir, "train")
-        for i in range(args.num_envs)
-    ])
-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+    envs = gym.vector.SyncVectorEnv(
+        [
+            make_env(
+                args.env_id,
+                args.seed + rank * args.num_envs + i,
+                rank,
+                args.capture_video,
+                logger.log_dir,
+                "train",
+            )
+            for i in range(args.num_envs)
+        ]
+    )
+    assert isinstance(
+        envs.single_action_space, gym.spaces.Discrete
+    ), "only discrete action space is supported"
 
     # Define the agent and the optimizer and setup them with Fabric
     agent: PPOLightningAgent = PPOLightningAgent(
@@ -109,8 +106,13 @@ def main(args: argparse.Namespace):
     ep_len_avg = torchmetrics.MeanMetric().to(device)
 
     # Local data
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape, device=device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape, device=device)
+    obs = torch.zeros(
+        (args.num_steps, args.num_envs) + envs.single_observation_space.shape,
+        device=device,
+    )
+    actions = torch.zeros(
+        (args.num_steps, args.num_envs) + envs.single_action_space.shape, device=device
+    )
     logprobs = torch.zeros((args.num_steps, args.num_envs), device=device)
     rewards = torch.zeros((args.num_steps, args.num_envs), device=device)
     dones = torch.zeros((args.num_steps, args.num_envs), device=device)
@@ -125,13 +127,13 @@ def main(args: argparse.Namespace):
     # Get the first environment observation and start the optimization
     next_obs = torch.tensor(envs.reset(seed=args.seed)[0], device=device)
     next_done = torch.zeros(args.num_envs, device=device)
-    for update in range(1, num_updates + 1):
+    for update in trange(1, num_updates + 1, leave=False):
         # Learning rate annealing
         if args.anneal_lr:
             linear_annealing(optimizer, update, num_updates, args.learning_rate)
         fabric.log("Info/learning_rate", optimizer.param_groups[0]["lr"], global_step)
 
-        for step in range(0, args.num_steps):
+        for step in trange(0, args.num_steps, leave=False):
             global_step += args.num_envs * world_size
             obs[step] = next_obs
             dones[step] = next_done
@@ -146,7 +148,9 @@ def main(args: argparse.Namespace):
             # Single environment step
             next_obs, reward, done, truncated, info = envs.step(action.cpu().numpy())
             done = torch.logical_or(torch.tensor(done), torch.tensor(truncated))
-            rewards[step] = torch.tensor(reward, device=device, dtype=torch.float32).view(-1)
+            rewards[step] = torch.tensor(
+                reward, device=device, dtype=torch.float32
+            ).view(-1)
             next_obs, next_done = torch.tensor(next_obs, device=device), done.to(device)
 
             if "final_info" in info:
@@ -170,7 +174,14 @@ def main(args: argparse.Namespace):
 
         # Estimate returns with GAE (https://arxiv.org/abs/1506.02438)
         returns, advantages = agent.estimate_returns_and_advantages(
-            rewards, values, dones, next_obs, next_done, args.num_steps, args.gamma, args.gae_lambda
+            rewards,
+            values,
+            dones,
+            next_obs,
+            next_done,
+            args.num_steps,
+            args.gamma,
+            args.gae_lambda,
         )
 
         # Flatten the batch
@@ -188,7 +199,9 @@ def main(args: argparse.Namespace):
             gathered_data = fabric.all_gather(local_data)
             for k, v in gathered_data.items():
                 if k == "obs":
-                    gathered_data[k] = v.reshape((-1,) + envs.single_observation_space.shape)
+                    gathered_data[k] = v.reshape(
+                        (-1,) + envs.single_observation_space.shape
+                    )
                 elif k == "actions":
                     gathered_data[k] = v.reshape((-1,) + envs.single_action_space.shape)
                 else:
@@ -198,13 +211,54 @@ def main(args: argparse.Namespace):
 
         # Train the agent
         train(fabric, agent, optimizer, gathered_data, global_step, args)
-        fabric.log("Time/step_per_second", int(global_step / (time.time() - start_time)), global_step)
-
+        fabric.log(
+            "Time/step_per_second",
+            int(global_step / (time.time() - start_time)),
+            global_step,
+        )
     envs.close()
-    if fabric.is_global_zero:
-        test(agent.module, device, fabric.logger.experiment, args)
 
 
 if __name__ == "__main__":
-    args = parse_args()
+
+    from dataclasses import dataclass
+
+    @dataclass
+    class PPOConfig:
+        # Experiment
+        exp_name: str = "default"
+
+        # PyTorch
+        seed: int = 42
+        cuda: bool = False
+        player_on_gpu: bool = False
+        torch_deterministic: bool = False
+
+        # Distributed
+        num_envs: int = 2
+        share_data: bool = False
+        per_rank_batch_size: int = 64
+
+        # Environment
+        env_id: str = "CartPole-v1"
+        num_steps: int = 512
+        capture_video: bool = False
+
+        # PPO
+        total_timesteps: int = 2**16
+        learning_rate: float = 1e-3
+        anneal_lr: bool = False
+        gamma: float = 0.99
+        gae_lambda: float = 0.95
+        update_epochs: int = 10
+        activation_function: str = "relu"  # choices: ["relu", "tanh"]
+        ortho_init: bool = False
+        normalize_advantages: bool = False
+        clip_coef: float = 0.2
+        clip_vloss: bool = False
+        ent_coef: float = 0.0
+        vf_coef: float = 1.0
+        max_grad_norm: float = 0.5
+
+    args = PPOConfig()
     main(args)
