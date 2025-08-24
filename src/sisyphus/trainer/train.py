@@ -6,15 +6,14 @@ from datetime import datetime
 import gymnasium as gym
 import torch
 import torchmetrics
-from sisyphus.tasks.fsmn_agent import PPOLightningAgent
-
-from sisyphus.utils import linear_annealing, make_env
+from lightning.fabric import Fabric
+from lightning.pytorch.loggers import CSVLogger
 from torch import Tensor
 from torch.utils.data import BatchSampler, DistributedSampler, RandomSampler
-
-from lightning.fabric import Fabric
-from lightning.fabric.loggers.csv_logs import CSVLogger
 from tqdm import tqdm, trange
+
+from sisyphus.tasks.fsmn_agent import PPOLightningAgent
+from sisyphus.utils import linear_annealing, make_env
 
 
 def train(
@@ -55,7 +54,7 @@ def train(
 def main(args: argparse.Namespace):
     run_name = f"{args.env_id}_{args.exp_name}_{args.seed}_{int(time.time())}"
     logger = CSVLogger(
-        root_dir=os.path.join(
+        save_dir=os.path.join(
             "logs", "fabric_logs", datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
         ),
         name=run_name,
@@ -63,6 +62,7 @@ def main(args: argparse.Namespace):
 
     # Initialize Fabric
     fabric = Fabric(loggers=logger)
+    fabric.launch()
     rank = fabric.global_rank
     world_size = fabric.world_size
     device = fabric.device
@@ -152,7 +152,8 @@ def main(args: argparse.Namespace):
                 reward, device=device, dtype=torch.float32
             ).view(-1)
             next_obs, next_done = torch.tensor(next_obs, device=device), done.to(device)
-
+            if info:
+                print(info)
             if "final_info" in info:
                 for i, agent_final_info in enumerate(info["final_info"]):
                     if agent_final_info is not None and "episode" in agent_final_info:
@@ -235,17 +236,17 @@ if __name__ == "__main__":
         torch_deterministic: bool = False
 
         # Distributed
-        num_envs: int = 2
+        num_envs: int = 4
         share_data: bool = False
         per_rank_batch_size: int = 64
 
         # Environment
         env_id: str = "CartPole-v1"
-        num_steps: int = 512
+        num_steps: int = 256
         capture_video: bool = False
 
         # PPO
-        total_timesteps: int = 2**16
+        total_timesteps: int = 2**12
         learning_rate: float = 1e-3
         anneal_lr: bool = False
         gamma: float = 0.99
