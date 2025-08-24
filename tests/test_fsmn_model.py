@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from collections import deque
-from pathlib import Path
-from typing import Deque, List, Tuple
+from typing import List, Tuple
 
+import gymnasium as gym
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm, trange
 
-from sisyphus.models.fsmn import FSMNPolicy
+from sisyphus.models.fsmn import FSMNPolicy, fsmn_allocate_caches
 
-# ===== 简易测试与示例推理 =====
+# ===== 采样工具 =====
 
 
 def select_action_from_logits(
@@ -18,7 +17,7 @@ def select_action_from_logits(
 ) -> torch.Tensor:
     # logits: [B, 2] 或 [B, T, 2]
     if logits.dim() == 3:
-        logits = logits[:, -1, :]  # 取最后一个时间步
+        logits = logits[:, -1, :]  # 仅取最后一步
     if deterministic:
         return torch.argmax(logits, dim=-1)
     probs = F.softmax(logits, dim=-1)
@@ -26,30 +25,35 @@ def select_action_from_logits(
     return dist.sample()
 
 
+# ===== 无状态单环境 rollout（使用外部缓存） =====
+
+
 def run_random_rollout(
     env_name: str = "CartPole-v1", episodes: int = 1, deterministic: bool = False
 ):
-    import gymnasium as gym
-    from tqdm import tqdm, trange
-
-    # 初始化环境与模型
     env = gym.make(env_name)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = FSMNPolicy().to(device)
 
-    # 历史缓冲区
-    hists = model.init_hists(device)
+    # 外部缓存（caller-owned）：每层一个 [B, H, K]，这里 B=1
+    caches = fsmn_allocate_caches(
+        model, batch_size=1, device=device, dtype=torch.float32
+    )
 
     for ep in trange(episodes, desc="episodes", leave=False):
         obs, _ = env.reset()
         done = False
         total_r = 0.0
         steps = 0
+        # 每回合开始时清空缓存
+        for c in caches:
+            c.zero_()
         while not done:
-            # 准备张量
-            obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(
+                0
+            )  # [1, 4]
             with torch.no_grad():
-                logits, _, hists = model.step(obs_t, hists)
+                logits, _, caches = model.step(obs_t, caches)
                 action = select_action_from_logits(
                     logits, deterministic=deterministic
                 ).item()
@@ -62,8 +66,7 @@ def run_random_rollout(
     env.close()
 
 
-# ===== 训练接口（可选：REINFORCE/A2C 可在此处扩展） =====
-# 下面仅提供一个占位的训练函数框架，便于后续接入你现有的 PPO/A2C 等训练器
+# ===== 向量化 batch rollout（使用外部缓存） =====
 
 
 class PolicyValueOutput:
@@ -79,38 +82,44 @@ def rollout_batch(
     horizon: int = 256,
     deterministic: bool = False,
 ) -> Tuple[dict, PolicyValueOutput]:
-    import gymnasium as gym
-    from tqdm import trange
-
     device = next(model.parameters()).device
     envs = [gym.make(env_name) for _ in range(batch_size)]
 
-    # 收集轨迹张量
+    # 轨迹缓冲
     obs_buf = torch.zeros(batch_size, horizon, 4, device=device)
     act_buf = torch.zeros(batch_size, horizon, dtype=torch.long, device=device)
     rew_buf = torch.zeros(batch_size, horizon, device=device)
     done_buf = torch.zeros(batch_size, horizon, device=device)
 
-    # 初始化
+    # 外部缓存（B=batch_size）
+    caches = fsmn_allocate_caches(
+        model, batch_size=batch_size, device=device, dtype=obs_buf.dtype
+    )
+
+    # 初始化观测
     obs_list = []
     for e in envs:
         o, _ = e.reset()
         obs_list.append(o)
 
-    # 逐步采样
+    # 逐步交互
     for t in trange(horizon, desc="rollout", leave=False):
-        obs_t = torch.tensor(obs_list, dtype=torch.float32, device=device)
-        logits, value = model(obs_t)  # [B,1,2],[B,1]
-        a_t = select_action_from_logits(logits, deterministic)
+        obs_t = torch.tensor(obs_list, dtype=torch.float32, device=device)  # [B, 4]
+        with torch.no_grad():
+            logits, _, caches = model.step(obs_t, caches)  # logits: [B, 2]
+            a_t = select_action_from_logits(logits, deterministic)
 
-        # 与环境交互
-        next_obs_list = []
-        rewards = []
-        dones = []
+        next_obs_list: List = []
+        rewards: List[float] = []
+        dones: List[float] = []
         for i, e in enumerate(envs):
             obs, r, terminated, truncated, _ = e.step(int(a_t[i].item()))
             d = terminated or truncated
-            next_obs_list.append(obs if not d else e.reset()[0])
+            if d:
+                obs2, _ = e.reset()
+                next_obs_list.append(obs2)
+            else:
+                next_obs_list.append(obs)
             rewards.append(r)
             dones.append(float(d))
 
@@ -120,24 +129,32 @@ def rollout_batch(
         rew_buf[:, t] = torch.tensor(rewards, device=device)
         done_buf[:, t] = torch.tensor(dones, device=device)
 
+        # 对于 done 的环境，清零其 batch 维对应的缓存行，避免跨回合泄漏
+        if any(dones):
+            done_mask = done_buf[:, t].bool()
+            for k in range(len(caches)):
+                if caches[k].numel() > 0:
+                    caches[k][done_mask] = 0.0
+
         obs_list = next_obs_list
 
-    # 关闭环境
     for e in envs:
         e.close()
 
-    # 重新计算完整序列上的 logits/value（方便后续优势估计）
-    logits_seq, value_seq = model(obs_buf)
+    # 全序列因果前向（用于价值、优势估计）
+    with torch.no_grad():
+        logits_seq, value_seq = model(obs_buf)  # [B, T, 2], [B, T]
+
     out = PolicyValueOutput(logits_seq, value_seq)
     batch = {
-        "obs": obs_buf,  # [B,T,4]
-        "act": act_buf,  # [B,T]
-        "rew": rew_buf,  # [B,T]
-        "done": done_buf,  # [B,T]
+        "obs": obs_buf,  # [B, T, 4]
+        "act": act_buf,  # [B, T]
+        "rew": rew_buf,  # [B, T]
+        "done": done_buf,  # [B, T]
     }
     return batch, out
 
 
 if __name__ == "__main__":
-    # 简单跑几局，验证前向与 step 无误（随机权重，不会稳定控制）
+    # 简单验证：随机权重 + 外部缓存
     run_random_rollout(env_name="CartPole-v1", episodes=3, deterministic=False)
