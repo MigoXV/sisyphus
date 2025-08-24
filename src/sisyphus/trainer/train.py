@@ -1,4 +1,3 @@
-import argparse
 import os
 import time
 from datetime import datetime
@@ -22,7 +21,7 @@ def train(
     optimizer: torch.optim.Optimizer,
     data: dict[str, Tensor],
     global_step: int,
-    args: argparse.Namespace,
+    args,
 ):
     indexes = list(range(data["obs"].shape[0]))
     if args.share_data:
@@ -51,7 +50,7 @@ def train(
         agent.on_train_epoch_end(global_step)
 
 
-def main(args: argparse.Namespace):
+def main(args):
     run_name = f"{args.env_id}_{args.exp_name}_{args.seed}_{int(time.time())}"
     logger = CSVLogger(
         save_dir=os.path.join(
