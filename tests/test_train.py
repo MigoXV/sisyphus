@@ -21,11 +21,11 @@ if __name__ == "__main__":
 
         # Environment
         env_id: str = "CartPole-v1"
-        num_steps: int = 64
+        num_steps: int = 512
         capture_video: bool = True
 
         # PPO
-        total_timesteps: int = 2**20
+        total_timesteps: int = 2**24
         learning_rate: float = 1e-3
         anneal_lr: bool = False
         gamma: float = 0.99
