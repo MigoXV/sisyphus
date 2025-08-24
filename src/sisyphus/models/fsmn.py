@@ -17,8 +17,8 @@ class CausalFSMNBlock(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.memory_order = memory_order
-        self.proj = nn.Identity()
-        self.taps = nn.Parameter(torch.zeros(hidden_dim, memory_order))
+        self.proj = nn.Linear(hidden_dim, hidden_dim)
+        self.taps = nn.Parameter(torch.randn(hidden_dim, memory_order))
         self.ln = nn.LayerNorm(hidden_dim) if use_layernorm else nn.Identity()
 
     def _build_dw_kernel(self, dtype, device):
