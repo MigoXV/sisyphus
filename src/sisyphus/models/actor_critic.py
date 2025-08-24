@@ -75,7 +75,7 @@ class ActorCriticWrapper(nn.Module):
             return self.fsmn_policy.step(observation, caches)
         else:
             # Use forward for batch processing
-            logits, values, _ = self.fsmn_policy.step(observation)
+            logits, values, _ = self.fsmn_policy.forward_chunk(observation)
             return logits, values, None
 
     def get_value(self, observation: torch.Tensor) -> torch.Tensor:
